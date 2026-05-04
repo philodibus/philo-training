@@ -729,6 +729,51 @@ function getToken(callback) {
   });
 }
 
+function ensureMsalReady(callback, attemptsLeft) {
+  if (typeof attemptsLeft === 'undefined') attemptsLeft = 20;
+  // Warte bis msal-browser CDN geladen
+  if (typeof msal === 'undefined') {
+    if (attemptsLeft <= 0) {
+      callback('MSAL-Bibliothek konnte nicht geladen werden. Internet/AdBlocker pruefen.');
+      return;
+    }
+    setTimeout(function() { ensureMsalReady(callback, attemptsLeft - 1); }, 250);
+    return;
+  }
+  // MSAL geladen. Erstelle Instanz wenn noch nicht da
+  if (!msalI) {
+    var cid = getCID();
+    if (!cid) { callback('Keine Client-ID'); return; }
+    try {
+      msalI = new msal.PublicClientApplication({
+        auth: {
+          clientId: cid,
+          authority: 'https://login.microsoftonline.com/consumers',
+          redirectUri: window.location.href.split('#')[0].split('?')[0]
+        },
+        cache: { cacheLocation: 'localStorage' }
+      });
+    } catch (e) {
+      callback('MSAL-Setup fehlgeschlagen: ' + e.message);
+      return;
+    }
+  }
+  // Initialisiere
+  msalI.initialize().then(function() {
+    return msalI.handleRedirectPromise();
+  }).then(function(r) {
+    if (r) {
+      odAcc = r.account;
+    } else if (!odAcc) {
+      var accs = msalI.getAllAccounts();
+      if (accs.length > 0) odAcc = accs[0];
+    }
+    callback(null);
+  }).catch(function(e) {
+    callback('MSAL-Initialisierung fehlgeschlagen: ' + e.message);
+  });
+}
+
 function odAct() {
   if (odAcc) {
     odAcc = null;
@@ -742,17 +787,30 @@ function odAct() {
     document.getElementById('cid-input').focus();
     return;
   }
-  if (!msalI) initMsal();
-  if (!msalI) { toast('MSAL nicht bereit', true); return; }
   setODSync(true);
-  msalI.loginPopup({ scopes: ODS }).then(function(r) {
-    odAcc = r.account;
-    updOD();
-    toast('Angemeldet als ' + (odAcc.name || odAcc.username));
-    setODSync(false);
-  }).catch(function(e) {
-    toast('Anmeldung fehlgeschlagen: ' + e.message, true);
-    setODSync(false);
+  ensureMsalReady(function(err) {
+    if (err) {
+      toast(err, true);
+      setODSync(false);
+      return;
+    }
+    // Wenn schon angemeldet via getAllAccounts, fertig
+    if (odAcc) {
+      updOD();
+      toast('Bereits angemeldet als ' + (odAcc.name || odAcc.username));
+      setODSync(false);
+      return;
+    }
+    // Login-Popup öffnen
+    msalI.loginPopup({ scopes: ODS }).then(function(r) {
+      odAcc = r.account;
+      updOD();
+      toast('Angemeldet als ' + (odAcc.name || odAcc.username));
+      setODSync(false);
+    }).catch(function(e) {
+      toast('Anmeldung fehlgeschlagen: ' + e.message, true);
+      setODSync(false);
+    });
   });
 }
 
