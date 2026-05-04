@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>index</title>
+<title>Training Log</title>
+<script src="https://alcdn.msauth.net/browser/3.13.0/js/msal-browser.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f0d;color:#e8e6df;min-height:100vh;font-size:14px;padding-bottom:70px}
@@ -106,8 +107,24 @@ input[type=number]{-moz-appearance:textfield}
 
 <div class="page" id="p-data">
   <div class="pt">Daten</div>
-  <div class="ps">Export & Import</div>
-  <div class="sl">Manueller Sync (lade Datei hoch in dein OneDrive)</div>
+  <div class="ps">Sync &amp; Backup</div>
+
+  <div class="sl">OneDrive Sync</div>
+  <div id="od-status" style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:#1a1a17;border:1px solid #3a3a34;border-radius:8px;margin-bottom:8px;font-size:12px">
+    <div id="od-dot" style="width:8px;height:8px;border-radius:50%;background:#6a6860;flex-shrink:0"></div>
+    <div id="od-label" style="flex:1;color:#9a9890">Nicht verbunden</div>
+    <button id="od-btn" onclick="odAct()" style="padding:5px 10px;border-radius:5px;font-size:11px;border:1px solid #4a4a43;background:#242420;color:#9a9890">Anmelden</button>
+  </div>
+  <button class="db" id="sync-btn" onclick="syncOD()" disabled style="background:#2a4a7a;border-color:#5588bb;color:#5588bb">↕ Synchronisieren</button>
+  <input type="text" id="cid-input" placeholder="Azure Client-ID eintragen..." oninput="saveCID(this.value)" style="width:100%;background:#242420;border:1px solid #3a3a34;border-radius:8px;color:#e8e6df;font-size:11px;padding:8px 11px;margin-bottom:8px;font-family:monospace">
+  <div style="font-size:11px;color:#6a6860;line-height:1.6;margin-bottom:14px;padding:9px 11px;background:#1a1a17;border-radius:8px">
+    <b style="color:#c8b865">Setup:</b> Azure Portal → App registrations → New registration → Name "TrainingLog" → "Personal Microsoft accounts only" → Redirect URI als "Single-page application" mit URL dieser Seite → Client-ID hier eintragen.<br><br>
+    Speicherort: <code style="background:#242420;padding:1px 4px;border-radius:3px">Apps/TrainingLog/training-log.json</code>
+  </div>
+
+  <div class="div"></div>
+
+  <div class="sl">Manueller Export/Import</div>
   <button class="db" onclick="expJSON()">⬇ JSON exportieren</button>
   <button class="db imp" onclick="document.getElementById('impf').click()">⬆ JSON importieren</button>
   <input type="file" id="impf" accept=".json" style="display:none" onchange="impJSON(event)">
@@ -651,10 +668,214 @@ function toast(msg, isErr) {
   setTimeout(function() { t.className = 'tst'; }, 2400);
 }
 
+// ONEDRIVE SYNC
+var msalI = null;
+var odAcc = null;
+var ODP = 'Apps/TrainingLog/training-log.json';
+var ODS = ['Files.ReadWrite', 'User.Read'];
+
+function getCID() { return localStorage.getItem('od_cid') || ''; }
+function saveCID(v) {
+  localStorage.setItem('od_cid', v.trim());
+  initMsal();
+}
+
+function initMsal() {
+  var cid = getCID();
+  if (!cid) return;
+  if (typeof msal === 'undefined') {
+    setTimeout(initMsal, 500);
+    return;
+  }
+  try {
+    msalI = new msal.PublicClientApplication({
+      auth: {
+        clientId: cid,
+        authority: 'https://login.microsoftonline.com/consumers',
+        redirectUri: window.location.href.split('#')[0].split('?')[0]
+      },
+      cache: { cacheLocation: 'localStorage' }
+    });
+    msalI.initialize().then(function() {
+      return msalI.handleRedirectPromise();
+    }).then(function(r) {
+      if (r) {
+        odAcc = r.account;
+      } else {
+        var accs = msalI.getAllAccounts();
+        if (accs.length > 0) odAcc = accs[0];
+      }
+      updOD();
+    }).catch(function(e) {
+      console.warn('MSAL init error:', e);
+    });
+  } catch (e) {
+    console.warn('MSAL setup failed:', e);
+  }
+}
+
+function getToken(callback) {
+  if (!msalI || !odAcc) { callback(null); return; }
+  msalI.acquireTokenSilent({ scopes: ODS, account: odAcc }).then(function(r) {
+    callback(r.accessToken);
+  }).catch(function() {
+    msalI.acquireTokenPopup({ scopes: ODS }).then(function(r) {
+      odAcc = r.account;
+      callback(r.accessToken);
+    }).catch(function(e) {
+      toast('Token-Fehler', true);
+      callback(null);
+    });
+  });
+}
+
+function odAct() {
+  if (odAcc) {
+    odAcc = null;
+    updOD();
+    toast('Abgemeldet');
+    return;
+  }
+  var cid = getCID();
+  if (!cid) {
+    toast('Bitte Client-ID eintragen', true);
+    document.getElementById('cid-input').focus();
+    return;
+  }
+  if (!msalI) initMsal();
+  if (!msalI) { toast('MSAL nicht bereit', true); return; }
+  setODSync(true);
+  msalI.loginPopup({ scopes: ODS }).then(function(r) {
+    odAcc = r.account;
+    updOD();
+    toast('Angemeldet als ' + (odAcc.name || odAcc.username));
+    setODSync(false);
+  }).catch(function(e) {
+    toast('Anmeldung fehlgeschlagen: ' + e.message, true);
+    setODSync(false);
+  });
+}
+
+function syncOD() {
+  if (!odAcc) { toast('Nicht angemeldet', true); return; }
+  setODSync(true);
+  getToken(function(token) {
+    if (!token) { setODSync(false); return; }
+
+    // 1. Lese Remote-Datei
+    var url = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + ODP + ':/content';
+    fetch(url, { headers: { Authorization: 'Bearer ' + token } })
+      .then(function(resp) {
+        if (resp.ok) return resp.json();
+        if (resp.status === 404) return null;
+        throw new Error('Lesefehler: ' + resp.status);
+      })
+      .then(function(remote) {
+        // 2. Merge wenn remote vorhanden
+        if (remote && remote.db) {
+          db = mergeDB(db, remote.db);
+          saveDB();
+        }
+        // 3. Schreibe zurück
+        var payload = JSON.stringify({ synced: new Date().toISOString(), v: '0.9', db: db });
+        return fetch(url, {
+          method: 'PUT',
+          headers: {
+            Authorization: 'Bearer ' + token,
+            'Content-Type': 'application/json'
+          },
+          body: payload
+        });
+      })
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('Schreibfehler: ' + resp.status);
+        var ts = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        localStorage.setItem('od_sync', ts);
+        updOD();
+        rendT();
+        toast('Sync ✓ um ' + ts);
+        setODSync(false);
+      })
+      .catch(function(e) {
+        toast('Fehler: ' + e.message, true);
+        setODSync(false);
+      });
+  });
+}
+
+function mergeDB(local, remote) {
+  var merged = {};
+  // Alle Wochen aus beiden sammeln
+  var allWks = {};
+  for (var k in local) allWks[k] = true;
+  for (var k in remote) allWks[k] = true;
+
+  for (var wk in allWks) {
+    var l = local[wk];
+    var r = remote[wk];
+    if (!l) { merged[wk] = r; continue; }
+    if (!r) { merged[wk] = l; continue; }
+
+    merged[wk] = { sessions: {} };
+    var allSids = {};
+    for (var sid in (l.sessions || {})) allSids[sid] = true;
+    for (var sid in (r.sessions || {})) allSids[sid] = true;
+
+    for (var sid in allSids) {
+      var ls = l.sessions ? l.sessions[sid] : null;
+      var rs = r.sessions ? r.sessions[sid] : null;
+      if (!ls) { merged[wk].sessions[sid] = rs; continue; }
+      if (!rs) { merged[wk].sessions[sid] = ls; continue; }
+      // Nimm die Version mit mehr abgehakten Übungen
+      var lDone = 0, rDone = 0;
+      for (var i = 0; i < (ls.ex || []).length; i++) if (ls.ex[i].done) lDone++;
+      for (var i = 0; i < (rs.ex || []).length; i++) if (rs.ex[i].done) rDone++;
+      merged[wk].sessions[sid] = lDone >= rDone ? ls : rs;
+    }
+  }
+  return merged;
+}
+
+function setODSync(v) {
+  var dot = document.getElementById('od-dot');
+  if (v) dot.style.background = '#c8b865';
+  else dot.style.background = odAcc ? '#6aaa6a' : '#6a6860';
+  document.getElementById('sync-btn').disabled = v || !odAcc;
+}
+
+function updOD() {
+  var dot = document.getElementById('od-dot');
+  var lbl = document.getElementById('od-label');
+  var btn = document.getElementById('od-btn');
+  var syncBtn = document.getElementById('sync-btn');
+
+  if (odAcc) {
+    dot.style.background = '#6aaa6a';
+    var lastSync = localStorage.getItem('od_sync');
+    var name = odAcc.name || odAcc.username || 'Angemeldet';
+    lbl.innerHTML = '<b style="color:#e8e6df">' + name + '</b>' + (lastSync ? ' · ' + lastSync : '');
+    btn.textContent = 'Abmelden';
+    syncBtn.disabled = false;
+  } else {
+    dot.style.background = '#6a6860';
+    lbl.textContent = 'Nicht verbunden';
+    btn.textContent = 'Anmelden';
+    syncBtn.disabled = true;
+  }
+}
+
 // INIT
 loadDB();
 cW = getWK(new Date());
 rendT();
+
+// MSAL nachladen wenn Client-ID schon gespeichert
+var savedCID = getCID();
+if (savedCID) {
+  document.getElementById('cid-input').value = savedCID;
+  initMsal();
+}
+updOD();
 </script>
 </body>
 </html>
